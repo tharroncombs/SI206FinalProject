@@ -9,9 +9,10 @@ import os
 # Constants
 START_DATE = datetime(2020, 3, 1)
 END_DATE = datetime(2023, 3, 1)
-COVID_API_KEY = "a8f75039e13840afadef9ba92b998956"
 COVID_BASE_URL = "https://api.covidactnow.org/v2"
-FLU_API_KEY = "8120b330a58f8"
+
+COVID_API_KEY_ENV = "COVID_ACT_NOW_API_KEY"
+FLU_API_KEY_ENV = "FLUVIEW_API_KEY"
 
 # Location Constants
 MICHIGAN_LOCATION = Point(42.3314, -83.0458)  # Detroit, Michigan
@@ -28,13 +29,13 @@ def create_database():
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         db_path = os.path.join(script_dir, "final_project.db")
-        
+
         # Create a new database connection
         conn = sqlite3.connect(db_path)
-        
+
         # Enable foreign key support
         conn.execute("PRAGMA foreign_keys = ON")
-        
+
         # Create run counts table
         conn.execute("""
         CREATE TABLE IF NOT EXISTS run_counts (
@@ -90,7 +91,7 @@ def create_database():
             weekly_cases INTEGER
         )
         """)
-        
+
         # Create flu data table
         conn.execute("""
         CREATE TABLE IF NOT EXISTS flu_data_march_2020_to_2023 (
@@ -101,15 +102,15 @@ def create_database():
             PRIMARY KEY (region_key, date)
         )
         """)
-        
+
         conn.commit()
         print("Database and tables created successfully")
         return True
-        
+
     except Exception as e:
         print(f"Error creating database: {str(e)}")
         return False
-        
+
     finally:
         if conn:
             conn.close()
@@ -118,6 +119,14 @@ def get_db_connection():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     db_path = os.path.join(script_dir, "final_project.db")
     return sqlite3.connect(db_path)
+
+def get_api_key(env_var_name):
+    api_key = os.getenv(env_var_name)
+    if not api_key:
+        raise EnvironmentError(
+            f"Missing API key. Please set {env_var_name} in your environment."
+        )
+    return api_key
 
 def initialize_run_counts():
     conn = get_db_connection()
@@ -139,7 +148,7 @@ def get_run_count(table_name):
 def increment_run_count(table_name):
     conn = get_db_connection()
     conn.execute("""
-    INSERT INTO run_counts (table_name, run_count) 
+    INSERT INTO run_counts (table_name, run_count)
     VALUES (?, 1)
     ON CONFLICT(table_name) DO UPDATE SET run_count = run_count + 1
     """, (table_name,))
@@ -166,27 +175,27 @@ def process_weather_data(location, start_date, end_date, table_name):
     try:
         conn = get_db_connection()
         run_count = get_run_count("national_weather_data")
-        
+
         # Check if we already have complete data (run 5+)
         if run_count >= 5:
             print("Weather data already complete. Skipping collection.")
             return
-            
+
         # Get current data count
         current_count = conn.execute("SELECT COUNT(*) FROM national_weather_data").fetchone()[0] or 0
-        
+
         # Fetch data from API
         data = Daily(location, start_date, end_date).fetch()
         data.index = data.index.to_series().apply(pd.to_datetime)
         data.reset_index(inplace=True)
         data = data.rename(columns={"index": "time"})
-        
+
         # For runs 1-4, limit to next 25 rows after current count
         if run_count < 4:
             start_idx = current_count
             end_idx = start_idx + 25
             data = data.iloc[start_idx:end_idx]
-        
+
         # Insert new daily records
         for _, row in data.iterrows():
             conn.execute("""
@@ -220,13 +229,13 @@ def process_weather_data(location, start_date, end_date, table_name):
             INSERT OR REPLACE INTO "{table_name}" (week_id, tavg_f, tmin_f, tmax_f)
             VALUES (?, ?, ?, ?)
             """, week)
-        
+
         conn.commit()
-        
+
         # Print status
         new_count = conn.execute("SELECT COUNT(*) FROM national_weather_data").fetchone()[0]
         weekly_count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        
+
         increment_run_count("national_weather_data")
         current_run = run_count + 1
         print(f"Weather data processing complete (Run {current_run}):")
@@ -234,7 +243,7 @@ def process_weather_data(location, start_date, end_date, table_name):
         print(f"- New daily records: {new_count}")
         print(f"- Records added this run: {new_count - current_count}")
         print(f"- Weekly aggregated weather in {table_name}: {weekly_count} rows")
-        
+
     except Exception as e:
         print(f"Error processing weather data: {str(e)}")
         if conn:
@@ -248,31 +257,31 @@ def store_covid_data(data, table_name):
     conn = get_db_connection()
     try:
         run_count = get_run_count(table_name)
-        
+
         # Check if we already have complete data (run 5+)
         if run_count >= 5:
             print(f"{table_name} already complete. Skipping collection.")
             return
-            
+
         # Get current data count
         daily_table = "daily_" + table_name.replace("weekly_", "")
         current_count = conn.execute(f'SELECT COUNT(*) FROM "{daily_table}"').fetchone()[0] or 0
-        
+
         # Process the data
         df = pd.DataFrame(data)
         df['date'] = pd.to_datetime(df['date'])
-        
+
         # For runs 1-4, limit to next 25 rows after current count
         if run_count < 4:
             df = df.iloc[current_count:current_count + 25]
-        
+
         # Insert new daily records
         for _, row in df.iterrows():
             conn.execute(f"""
             INSERT OR IGNORE INTO "{daily_table}" (date, cases)
             VALUES (?, ?)
             """, (row['date'].strftime('%Y-%m-%d'), row.get('cases')))
-        
+
         # Update weekly aggregation
         weekly_data = conn.execute(f"""
         WITH daily_cases AS (
@@ -297,13 +306,13 @@ def store_covid_data(data, table_name):
             INSERT OR REPLACE INTO "{table_name}" (week_id, weekly_cases)
             VALUES (?, ?)
             """, (week_id, weekly_cases))
-        
+
         conn.commit()
-        
+
         # Print status
         new_count = conn.execute(f'SELECT COUNT(*) FROM "{daily_table}"').fetchone()[0]
         weekly_count = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-        
+
         increment_run_count(table_name)
         current_run = run_count + 1
         print(f"COVID data processing complete for {table_name} (Run {current_run}):")
@@ -311,7 +320,7 @@ def store_covid_data(data, table_name):
         print(f"- New daily records: {new_count}")
         print(f"- Records added this run: {new_count - current_count}")
         print(f"- Weekly aggregated data: {weekly_count} rows")
-        
+
     except Exception as e:
         print(f"Error in store_covid_data: {str(e)}")
         if conn:
@@ -322,14 +331,16 @@ def store_covid_data(data, table_name):
             conn.close()
 
 def fetch_and_store_michigan_covid():
-    url = f"{COVID_BASE_URL}/state/MI.timeseries.json?apiKey={COVID_API_KEY}"
+    api_key = get_api_key(COVID_API_KEY_ENV)
+    url = f"{COVID_BASE_URL}/state/MI.timeseries.json?apiKey={api_key}"
     response = requests.get(url)
     if response.status_code == 200:
         data = response.json().get("actualsTimeseries", [])
         store_covid_data(data, "weekly_michigan_covid_data")
 
 def fetch_and_store_national_covid():
-    url = f"{COVID_BASE_URL}/country/US.timeseries.json?apiKey={COVID_API_KEY}"
+    api_key = get_api_key(COVID_API_KEY_ENV)
+    url = f"{COVID_BASE_URL}/country/US.timeseries.json?apiKey={api_key}"
     response = requests.get(url)
     if response.status_code == 200:
         data = response.json().get("actualsTimeseries", [])
@@ -339,24 +350,25 @@ def fetch_and_store_flu_data():
     try:
         conn = get_db_connection()
         run_count = get_run_count("flu_data_march_2020_to_2023")
-        
+
         # Check if we already have complete data (run 5+)
         if run_count >= 5:
             print("Flu data already complete. Skipping collection.")
             return
-        
+
         # Get current data count
         current_count = conn.execute("SELECT COUNT(*) FROM flu_data_march_2020_to_2023").fetchone()[0] or 0
-        
+
         regions = {"mi": 1, "nat": 2}
         epiweeks = "202010-202310"
         base_url = "https://api.delphi.cmu.edu/epidata/fluview/"
-        params = {"regions": ",".join(regions.keys()), "epiweeks": epiweeks, "auth": FLU_API_KEY}
-        
+        api_key = get_api_key(FLU_API_KEY_ENV)
+        params = {"regions": ",".join(regions.keys()), "epiweeks": epiweeks, "auth": api_key}
+
         response = requests.get(base_url, params=params)
         response.raise_for_status()
         data = response.json()
-        
+
         if data["result"] == 1:
             df = pd.DataFrame(data["epidata"])
             df["region_key"] = df["region"].map(regions)
@@ -364,19 +376,19 @@ def fetch_and_store_flu_data():
                 lambda ew: Week(int(str(ew)[:4]), int(str(ew)[4:])).startdate().strftime('%Y-%m-%d')
             )
             df["week_id"] = df["date"].apply(lambda d: get_week_id(d))
-            
+
             # For runs 1-4, limit to next 25 rows after current count
             if run_count < 4:
                 df = df.iloc[current_count:current_count + 25]
-            
+
             # Insert new records
             for _, row in df.iterrows():
                 conn.execute("""
-                INSERT OR IGNORE INTO flu_data_march_2020_to_2023 
+                INSERT OR IGNORE INTO flu_data_march_2020_to_2023
                 (region_key, date, week_id, num_ili)
                 VALUES (?, ?, ?, ?)
                 """, (row["region_key"], row["date"], row["week_id"], row["num_ili"]))
-            
+
             conn.commit()
             
             # Print status
